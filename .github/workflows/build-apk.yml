@@ -18,6 +18,25 @@ jobs:
           channel: stable
       - name: Generate Android platform
         run: flutter create --platforms=android --org com.hum258 --project-name dhikr_counter .
+      - name: Configure Android speech recognition visibility
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("android/app/src/main/AndroidManifest.xml")
+          s = p.read_text()
+          query = """    <queries>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService" />
+                  </intent>
+              </queries>
+          """
+          if "<queries>" not in s:
+              s = s.replace("<application", query + "    <application", 1)
+          permission = '    <uses-permission android:name="android.permission.RECORD_AUDIO" />\\n'
+          if "android.permission.RECORD_AUDIO" not in s:
+              s = s.replace("<application", permission + "    <application", 1)
+          p.write_text(s)
+          PY
       - name: Install dependencies
         run: flutter pub get
       - name: Build release APK
