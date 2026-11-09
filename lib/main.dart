@@ -211,7 +211,12 @@ class _CounterPageState extends State<CounterPage> {
     restartScheduled = true;
     Future<void>.delayed(const Duration(milliseconds: 700), () async {
       restartScheduled = false;
-      if (!mounted || !keepRecording || starting || listening) return;
+      if (!mounted || !keepRecording || listening) return;
+      // إذا كان طلب listen السابق لم ينتهِ بعد، أعد المحاولة بدلاً من إسقاطها.
+      if (starting) {
+        _scheduleRestart();
+        return;
+      }
       await _listenAgain();
     });
   }
@@ -225,9 +230,10 @@ class _CounterPageState extends State<CounterPage> {
     try {
       await speech.listen(
         localeId: speechLocaleId,
-        listenFor: const Duration(minutes: 10),
-        // عند انتهاء مهلة الصمت يعيد التطبيق فتح جلسة الاستماع تلقائياً.
-        pauseFor: const Duration(seconds: 10),
+        // جلسات أقصر تمنع تراكم نص طويل داخل جلسة تعرف واحدة.
+        // عند انتهاء المهلة يعاد فتح الاستماع تلقائياً.
+        listenFor: const Duration(minutes: 1),
+        pauseFor: const Duration(seconds: 2),
         partialResults: true,
         cancelOnError: false,
         listenMode: stt.ListenMode.dictation,
