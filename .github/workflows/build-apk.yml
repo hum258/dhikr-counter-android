@@ -37,6 +37,318 @@ jobs:
               s = s.replace("<application", permission + "    <application", 1)
           p.write_text(s)
           PY
+      - name: Install persistent Android speech service
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          s = manifest.read_text()
+          for permission in [
+              'android.permission.FOREGROUND_SERVICE',
+              'android.permission.FOREGROUND_SERVICE_MICROPHONE',
+              'android.permission.WAKE_LOCK',
+              'android.permission.POST_NOTIFICATIONS',
+          ]:
+              tag = f'    <uses-permission android:name="{permission}" />'
+              if permission not in s:
+                  s = s.replace("<application", tag + "\\n    <application", 1)
+          service = '''
+                  <service
+                      android:name=".DhikrRecognitionService"
+                      android:exported="false"
+                      android:foregroundServiceType="microphone" />
+          '''
+          if "DhikrRecognitionService" not in s:
+              s = s.replace("</application>", service + "\\n    </application>")
+          manifest.write_text(s)
+          main = Path("android/app/src/main/kotlin/com/hum258/dhikr_counter/MainActivity.kt")
+          main.parent.mkdir(parents=True, exist_ok=True)
+          main.write_text(r"""package com.hum258.dhikr_counter
+
+          import android.Manifest
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import androidx.core.content.ContextCompat
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.EventChannel
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {
+              companion object {
+                  var eventSink: EventChannel.EventSink? = null
+                  fun emit(data: Map<String, Any?>) { eventSink?.success(data) }
+              }
+              private var pendingStart: MethodChannel.Result? = null
+              private var pendingArgs: Map<*, *>? = null
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  EventChannel(flutterEngine.dartExecutor.binaryMessenger, "dhikr/events")
+                      .setStreamHandler(object : EventChannel.StreamHandler {
+                          override fun onListen(arguments: Any?, events: EventChannel.EventSink?) { eventSink = events }
+                          override fun onCancel(arguments: Any?) { eventSink = null }
+                      })
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "dhikr/recorder")
+                      .setMethodCallHandler { call, result ->
+                          when (call.method) {
+                              "start" -> {
+                                  val args = call.arguments as? Map<*, *> ?: emptyMap<String, Any>()
+                                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                                      pendingStart = result
+                                      pendingArgs = args
+                                      requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 701)
+                                  } else {
+                                      startRecorder(args)
+                                      result.success(true)
+                                  }
+                              }
+                              "stop" -> {
+                                  startService(Intent(this, DhikrRecognitionService::class.java).setAction("STOP"))
+                                  result.success(true)
+                              }
+                              "setDhikr" -> {
+                                  val intent = Intent(this, DhikrRecognitionService::class.java).setAction("SET_DHIKR")
+                                      .putExtra("dhikr", call.argument<String>("dhikr") ?: "")
+                                  startService(intent)
+                                  result.success(true)
+                              }
+                              "getState" -> {
+                                  val p = getSharedPreferences("dhikr_service", MODE_PRIVATE)
+                                  result.success(mapOf(
+                                      "running" to p.getBoolean("running", false),
+                                      "listening" to p.getBoolean("listening", false),
+                                      "count" to p.getInt("count", 0),
+                                      "history" to p.getStringSet("history", emptySet<String>())?.toList().orEmpty()
+                                  ))
+                              }
+                              else -> result.notImplemented()
+                          }
+                      }
+              }
+
+              private fun startRecorder(args: Map<*, *>) {
+                  val intent = Intent(this, DhikrRecognitionService::class.java)
+                      .putExtra("dhikr", args["dhikr"]?.toString() ?: "لا إله إلا الله")
+                      .putExtra("locale", args["locale"]?.toString() ?: "ar-SA")
+                  if (android.os.Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+              }
+
+              override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (requestCode == 701) {
+                      val result = pendingStart
+                      val args = pendingArgs
+                      pendingStart = null
+                      pendingArgs = null
+                      if (result != null && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED && args != null) {
+                          startRecorder(args)
+                          result.success(true)
+                      } else {
+                          result?.error("MIC_PERMISSION", "Microphone permission denied", null)
+                      }
+                  }
+              }
+          }
+          """)
+          service = Path("android/app/src/main/kotlin/com/hum258/dhikr_counter/DhikrRecognitionService.kt")
+          service.write_text(r"""package com.hum258.dhikr_counter
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.Intent
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.speech.RecognitionListener
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
+          import android.content.pm.ServiceInfo
+          import java.text.Normalizer
+
+          class DhikrRecognitionService : Service(), RecognitionListener {
+              private val handler = Handler(Looper.getMainLooper())
+              private var recognizer: SpeechRecognizer? = null
+              private var target = "لا إله إلا الله"
+              private var locale = "ar-SA"
+              private var active = false
+              private var countedInUtterance = 0
+              private val prefs by lazy { getSharedPreferences("dhikr_service", MODE_PRIVATE) }
+
+              override fun onCreate() {
+                  super.onCreate()
+                  target = prefs.getString("target", target) ?: target
+                  locale = prefs.getString("locale", locale) ?: locale
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  when (intent?.action) {
+                      "STOP" -> { stopRecognition(); stopSelf(); return START_NOT_STICKY }
+                      "SET_DHIKR" -> {
+                          target = intent.getStringExtra("dhikr") ?: target
+                          countedInUtterance = 0
+                          prefs.edit().putString("target", target).putInt("count", 0).putStringSet("history", emptySet()).apply()
+                          emit("state", listening = active)
+                      }
+                      else -> {
+                          target = intent?.getStringExtra("dhikr") ?: target
+                          locale = intent?.getStringExtra("locale") ?: locale
+                      }
+                  }
+                  createChannel()
+                  startAsForeground()
+                  prefs.edit().putBoolean("running", true).putString("target", target).putString("locale", locale).apply()
+                  active = true
+                  startRecognition()
+                  return START_STICKY
+              }
+
+              private fun createChannel() {
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      val manager = getSystemService(NotificationManager::class.java)
+                      manager.createNotificationChannel(NotificationChannel("dhikr_mic", "تسجيل الأذكار", NotificationManager.IMPORTANCE_LOW))
+                  }
+              }
+
+              private fun startAsForeground() {
+                  val open = PendingIntent.getActivity(this, 0, packageManager.getLaunchIntentForPackage(packageName), PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
+                  val notification = if (Build.VERSION.SDK_INT >= 26) {
+                      Notification.Builder(this, "dhikr_mic")
+                          .setContentTitle("عدّاد الأذكار يعمل")
+                          .setContentText("الاستماع الصوتي مستمر حتى تضغط إيقاف")
+                          .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                          .setContentIntent(open)
+                          .setOngoing(true)
+                          .build()
+                  } else {
+                      @Suppress("DEPRECATION")
+                      Notification.Builder(this).setContentTitle("عدّاد الأذكار يعمل")
+                          .setContentText("الاستماع الصوتي مستمر حتى تضغط إيقاف")
+                          .setSmallIcon(android.R.drawable.ic_btn_speak_now).setOngoing(true).build()
+                  }
+                  if (Build.VERSION.SDK_INT >= 29) startForeground(41, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                  else startForeground(41, notification)
+              }
+
+              private fun startRecognition() {
+                  if (!active) return
+                  handler.removeCallbacksAndMessages(null)
+                  try {
+                      if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+                          emit("error")
+                          handler.postDelayed({ startRecognition() }, 2500)
+                          return
+                      }
+                      recognizer?.destroy()
+                      recognizer = SpeechRecognizer.createSpeechRecognizer(this).also { it.setRecognitionListener(this) }
+                      val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                          putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                          putExtra(RecognizerIntent.EXTRA_LANGUAGE, locale)
+                          putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, locale)
+                          putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                          putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+                          putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 180000L)
+                          putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 180000L)
+                      }
+                      recognizer?.startListening(intent)
+                  } catch (_: Exception) {
+                      emit("error")
+                      handler.postDelayed({ startRecognition() }, 1500)
+                  }
+              }
+
+              private fun normalize(s: String): String {
+                  var x = Normalizer.normalize(s, Normalizer.Form.NFD)
+                  x = x.replace(Regex("[\\u064B-\\u065F\\u0670ـ]"), "")
+                      .replace(Regex("[أإآٱ]"), "ا").replace("ى", "ي")
+                      .replace("ة", "ه").replace("ؤ", "و").replace("ئ", "ي")
+                      .replace(Regex("[،؛؟,.!?:…()\\[\\]{}]"), " ")
+                      .replace(Regex("\\s+"), " ").trim()
+                  return x
+              }
+
+              private fun repetitions(text: String): Int {
+                  val words = normalize(text).split(" ").filter { it.isNotBlank() }
+                  val targetWords = normalize(target).split(" ").filter { it.isNotBlank() }
+                  if (targetWords.isEmpty() || words.isEmpty() || words.size % targetWords.size != 0) return 0
+                  var i = 0
+                  while (i < words.size) {
+                      for (j in targetWords.indices) if (words[i + j] != targetWords[j]) return 0
+                      i += targetWords.size
+                  }
+                  return words.size / targetWords.size
+              }
+
+              private fun process(text: String) {
+                  if (text.isBlank()) return
+                  val total = repetitions(text)
+                  if (total > countedInUtterance) {
+                      val delta = total - countedInUtterance
+                      val old = prefs.getInt("count", 0)
+                      val history = prefs.getStringSet("history", emptySet())?.toMutableList() ?: mutableListOf()
+                      repeat(delta) { history.add(target) }
+                      prefs.edit().putInt("count", old + delta).putStringSet("history", history.toSet()).apply()
+                      countedInUtterance = total
+                  }
+                  emit("transcript", text)
+              }
+
+              private fun emit(type: String, text: String? = null, listening: Boolean = active) {
+                  val history = prefs.getStringSet("history", emptySet())?.toList().orEmpty()
+                  MainActivity.emit(mapOf("type" to type, "text" to text, "listening" to listening,
+                      "count" to prefs.getInt("count", 0), "history" to history))
+              }
+
+              private fun retry() {
+                  if (!active) return
+                  countedInUtterance = 0
+                  handler.postDelayed({ startRecognition() }, 800)
+              }
+
+              override fun onReadyForSpeech(params: Bundle?) { emit("state", listening = true) }
+              override fun onBeginningOfSpeech() {}
+              override fun onRmsChanged(rmsdB: Float) {}
+              override fun onBufferReceived(buffer: ByteArray?) {}
+              override fun onEndOfSpeech() { emit("state", listening = false) }
+              override fun onError(error: Int) { emit("error", listening = false); retry() }
+              override fun onResults(results: Bundle?) {
+                  val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+                  process(text)
+                  countedInUtterance = 0
+                  retry()
+              }
+              override fun onPartialResults(partialResults: Bundle?) {
+                  val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+                  process(text)
+              }
+              override fun onEvent(eventType: Int, params: Bundle?) {}
+
+              private fun stopRecognition() {
+                  active = false
+                  handler.removeCallbacksAndMessages(null)
+                  try { recognizer?.cancel(); recognizer?.destroy() } catch (_: Exception) {}
+                  recognizer = null
+                  prefs.edit().putBoolean("running", false).putBoolean("listening", false).apply()
+                  emit("state", listening = false)
+                  stopForeground(STOP_FOREGROUND_REMOVE)
+              }
+
+              override fun onDestroy() {
+                  active = false
+                  handler.removeCallbacksAndMessages(null)
+                  try { recognizer?.destroy() } catch (_: Exception) {}
+                  recognizer = null
+                  super.onDestroy()
+              }
+              override fun onBind(intent: Intent?): IBinder? = null
+          }
+          """)
+          PY
       - name: Install dependencies
         run: flutter pub get
       - name: Build release APK
