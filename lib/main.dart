@@ -62,6 +62,7 @@ class _CounterPageState extends State<CounterPage> {
   bool keepRecording = false;
   bool starting = false;
   bool restartScheduled = false;
+  String lastHeard = '';
 
   String _normalize(String value) {
     return value
@@ -102,18 +103,31 @@ class _CounterPageState extends State<CounterPage> {
       setState(() => status = 'جارٍ تشغيل التسجيل…');
     }
 
-    ready = await speech.initialize(
-      onStatus: _handleSpeechStatus,
-      onError: (error) {
-        keepRecording = false;
-        if (mounted) {
-          setState(() {
-            listening = false;
-            status = 'تعذر التعرف على الصوت: ${error.errorMsg}';
-          });
-        }
-      },
-    );
+    try {
+      ready = await speech.initialize(
+        onStatus: _handleSpeechStatus,
+        onError: (error) {
+          keepRecording = false;
+          starting = false;
+          if (mounted) {
+            setState(() {
+              listening = false;
+              status = 'تعذر التعرف على الصوت: ${error.errorMsg}';
+            });
+          }
+        },
+      );
+    } catch (error) {
+      keepRecording = false;
+      starting = false;
+      if (mounted) {
+        setState(() {
+          listening = false;
+          status = 'تعذر تهيئة التعرف الصوتي: $error';
+        });
+      }
+      return;
+    }
 
     if (!ready) {
       keepRecording = false;
@@ -127,6 +141,8 @@ class _CounterPageState extends State<CounterPage> {
       return;
     }
 
+    // تحرير قفل البدء قبل استدعاء _listenAgain حتى لا يبقى التسجيل معلقاً.
+    starting = false;
     await _listenAgain();
   }
 
@@ -164,14 +180,21 @@ class _CounterPageState extends State<CounterPage> {
         pauseFor: const Duration(seconds: 10),
         partialResults: true,
         onResult: (result) {
-          // لا نحتسب النتائج الجزئية؛ ننتظر النتيجة النهائية حتى لا يتكرر العد.
+          if (!mounted) return;
+          setState(() => lastHeard = result.recognizedWords);
+          // نحتسب النتيجة النهائية فقط لتجنب تكرار النتائج الجزئية.
           if (!result.finalResult) return;
           final added = _countOccurrences(result.recognizedWords, dhikr);
-          if (!mounted) return;
           if (added > 0) {
             setState(() {
               count += added;
               status = 'تم احتساب $added من الذكر ✓';
+            });
+          } else {
+            setState(() {
+              status = result.recognizedWords.trim().isEmpty
+                  ? 'لم يلتقط الهاتف كلاماً واضحاً، حاول مجدداً'
+                  : 'سمع الهاتف كلاماً لكنه لم يطابق الذكر المحدد';
             });
           }
         },
@@ -432,6 +455,20 @@ class _CounterPageState extends State<CounterPage> {
                   ],
                 ),
               ),
+              if (lastHeard.isNotEmpty)
+                Container(
+                  margin: const EdgeInsets.only(top: 10),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE9EDF2),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Text(
+                    'آخر كلام التقطه الهاتف: $lastHeard',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: muted, fontSize: 12),
+                  ),
+                ),
               const SizedBox(height: 20),
               SizedBox(
                 height: 58,
