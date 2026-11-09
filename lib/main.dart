@@ -64,8 +64,17 @@ class _CounterPageState extends State<CounterPage> {
   bool starting = false;
   bool restartScheduled = false;
   String lastHeard = '';
+  final Stopwatch recordingClock = Stopwatch();
+  Timer? elapsedTicker;
+  int elapsedSeconds = 0;
   int countedInCurrentUtterance = 0;
   String speechLocaleId = 'ar';
+
+  String _formatDuration(int seconds) {
+    final minutes = (seconds ~/ 60).toString().padLeft(2, '0');
+    final remaining = (seconds % 60).toString().padLeft(2, '0');
+    return '$minutes:$remaining';
+  }
 
   String _normalize(String value) {
     return value
@@ -99,9 +108,12 @@ class _CounterPageState extends State<CounterPage> {
   }
 
   Future<void> startRecording() async {
-    if (starting || listening) return;
+    if (starting || listening || keepRecording) return;
     starting = true;
     keepRecording = true;
+    elapsedTicker?.cancel();
+    recordingClock.reset();
+    elapsedSeconds = 0;
     if (mounted) {
       setState(() => status = 'جارٍ تشغيل التسجيل…');
     }
@@ -176,6 +188,12 @@ class _CounterPageState extends State<CounterPage> {
     if (!mounted) return;
 
     if (speechStatus == 'listening') {
+      if (!recordingClock.isRunning) recordingClock.start();
+      elapsedTicker ??= Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted && keepRecording) {
+          setState(() => elapsedSeconds = recordingClock.elapsed.inSeconds);
+        }
+      });
       setState(() {
         listening = true;
         status = 'التسجيل يعمل… قل الذكر بوضوح';
@@ -243,8 +261,7 @@ class _CounterPageState extends State<CounterPage> {
       );
       if (mounted && keepRecording) {
         setState(() {
-          listening = true;
-          status = 'التسجيل يعمل… قل الذكر بوضوح';
+          status = 'تم طلب تشغيل الميكروفون، بانتظار تأكيد النظام…';
         });
       }
     } catch (_) {
@@ -263,6 +280,10 @@ class _CounterPageState extends State<CounterPage> {
   Future<void> stopRecording() async {
     keepRecording = false;
     restartScheduled = false;
+    elapsedTicker?.cancel();
+    elapsedTicker = null;
+    recordingClock.stop();
+    elapsedSeconds = recordingClock.elapsed.inSeconds;
     await speech.stop();
     if (mounted) {
       setState(() {
@@ -300,6 +321,8 @@ class _CounterPageState extends State<CounterPage> {
   @override
   void dispose() {
     keepRecording = false;
+    elapsedTicker?.cancel();
+    recordingClock.stop();
     speech.stop();
     customController.dispose();
     super.dispose();
@@ -490,6 +513,11 @@ class _CounterPageState extends State<CounterPage> {
                       ),
                     ),
                     const SizedBox(height: 10),
+                    Text(
+                      'مدة التسجيل: ${_formatDuration(elapsedSeconds)}',
+                      style: const TextStyle(color: muted, fontSize: 14, fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 10),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
@@ -593,14 +621,14 @@ class _CounterPageState extends State<CounterPage> {
                 height: 58,
                 child: FilledButton.icon(
                   onPressed:
-                      listening || keepRecording ? stopRecording : startRecording,
+                      starting || listening || keepRecording ? stopRecording : startRecording,
                   icon: Icon(
-                    listening || keepRecording
+                    starting || listening || keepRecording
                         ? Icons.stop_circle_outlined
                         : Icons.fiber_manual_record_rounded,
                   ),
                   label: Text(
-                    listening || keepRecording ? 'إيقاف التسجيل' : 'ابدأ التسجيل',
+                    starting || listening || keepRecording ? 'إيقاف التسجيل' : 'ابدأ التسجيل',
                     style: const TextStyle(
                         fontSize: 17, fontWeight: FontWeight.w700),
                   ),
