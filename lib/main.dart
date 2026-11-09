@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:flutter/services.dart';
 
 void main() => runApp(const DhikrCounterApp());
 
@@ -42,7 +42,9 @@ class CounterPage extends StatefulWidget {
 }
 
 class _CounterPageState extends State<CounterPage> {
-  final stt.SpeechToText speech = stt.SpeechToText();
+  static const MethodChannel _recorder = MethodChannel('dhikr/recorder');
+  static const EventChannel _events = EventChannel('dhikr/events');
+  StreamSubscription<dynamic>? recorderEvents;
   final TextEditingController customController = TextEditingController();
 
   final List<String> presets = const [
@@ -68,7 +70,78 @@ class _CounterPageState extends State<CounterPage> {
   Timer? elapsedTicker;
   int elapsedSeconds = 0;
   int countedInCurrentUtterance = 0;
-  String speechLocaleId = 'ar';
+  String speechLocaleId = 'ar-SA';
+
+  @override
+  void initState() {
+    super.initState();
+    recorderEvents = _events.receiveBroadcastStream().listen(
+      _handleNativeEvent,
+      onError: (_) {
+        if (mounted) setState(() => status = 'انقطع الاتصال بخدمة التسجيل');
+      },
+    );
+    _restoreNativeState();
+  }
+
+  Future<void> _restoreNativeState() async {
+    try {
+      final state = await _recorder.invokeMapMethod<String, dynamic>('getState');
+      if (!mounted || state == null) return;
+      final savedHistory = (state['history'] as List?)?.cast<String>() ?? <String>[];
+      setState(() {
+        count = (state['count'] as num?)?.toInt() ?? count;
+        recognizedDhikr
+          ..clear()
+          ..addAll(savedHistory);
+        if (state['running'] == true) {
+          keepRecording = true;
+          listening = state['listening'] == true;
+          status = 'التسجيل مستمر في الخلفية';
+        }
+      });
+    } catch (_) {}
+  }
+
+  void _handleNativeEvent(dynamic event) {
+    if (!mounted || event is! Map) return;
+    final type = event['type'];
+    if (type == 'transcript') {
+      final heard = (event['text'] ?? '').toString();
+      final savedHistory = (event['history'] as List?)?.cast<String>();
+      setState(() {
+        if (heard.isNotEmpty) lastHeard = heard;
+        count = (event['count'] as num?)?.toInt() ?? count;
+        if (savedHistory != null) {
+          recognizedDhikr
+            ..clear()
+            ..addAll(savedHistory);
+        }
+      });
+    } else if (type == 'state') {
+      final active = event['listening'] == true;
+      setState(() {
+        listening = active;
+        starting = false;
+        if (active) {
+          if (!recordingClock.isRunning) recordingClock.start();
+          elapsedTicker ??= Timer.periodic(const Duration(seconds: 1), (_) {
+            if (mounted && keepRecording) {
+              setState(() => elapsedSeconds = recordingClock.elapsed.inSeconds);
+            }
+          });
+          status = 'التسجيل يعمل… قل الذكر بوضوح';
+        } else if (keepRecording) {
+          status = 'لا يوجد كلام حالياً، سيعود الاستماع تلقائياً…';
+        }
+      });
+    } else if (type == 'error') {
+      setState(() {
+        listening = false;
+        status = 'تعذر التقاط الصوت مؤقتاً، أحاول مجدداً…';
+      });
+    }
+  }
 
   String _formatDuration(int seconds) {
     final minutes = (seconds ~/ 60).toString().padLeft(2, '0');
@@ -108,207 +181,48 @@ class _CounterPageState extends State<CounterPage> {
   }
 
   Future<void> startRecording() async {
-    if (starting || listening || keepRecording) return;
+    if (starting || keepRecording) return;
     starting = true;
     keepRecording = true;
     elapsedTicker?.cancel();
     recordingClock.reset();
     elapsedSeconds = 0;
     if (mounted) {
-      setState(() => status = 'جارٍ تشغيل التسجيل…');
+      setState(() => status = 'جارٍ تشغيل خدمة التسجيل…');
     }
-
     try {
-      ready = await speech.initialize(
-        onStatus: _handleSpeechStatus,
-        onError: (error) {
+      await _recorder.invokeMethod('start', {
+        'dhikr': dhikr,
+        'locale': speechLocaleId,
+      });
+      if (mounted) {
+        setState(() {
           starting = false;
-          // الصمت أو عدم وجود كلام واضح ليس سبباً لإيقاف جلسة الذكر.
-          // نعيد فتح الاستماع ونُبقي المؤقت جارياً حتى يضغط المستخدم إيقاف.
-          final code = error.errorMsg.toLowerCase();
-          final silenceError = code.contains('no_match') ||
-              code.contains('speech_timeout') ||
-              code.contains('timeout') ||
-              code.contains('no-match');
-          if (keepRecording && (!error.permanent || silenceError)) {
-            _scheduleRestart();
-          } else if (error.permanent) {
-            keepRecording = false;
-            elapsedTicker?.cancel();
-            elapsedTicker = null;
-            recordingClock.stop();
-          }
-          if (mounted) {
-            setState(() {
-              listening = false;
-              status = keepRecording
-                  ? 'لا يوجد كلام حالياً، سيبقى التسجيل جاهزاً…'
-                  : 'تعذر التعرف على الصوت: ${error.errorMsg}';
-            });
-          }
-        },
-      );
+          status = 'تم تشغيل خدمة التسجيل، بانتظار التقاط الصوت…';
+        });
+      }
     } catch (error) {
       keepRecording = false;
       starting = false;
       if (mounted) {
-        setState(() {
-          listening = false;
-          status = 'تعذر تهيئة التعرف الصوتي: $error';
-        });
+        setState(() => status = 'تعذر تشغيل خدمة التسجيل: $error');
       }
-      return;
-    }
-
-    if (!ready) {
-      keepRecording = false;
-      starting = false;
-      if (mounted) {
-        setState(() {
-          listening = false;
-          status = 'التعرف على الكلام غير متاح على هذا الجهاز';
-        });
-      }
-      return;
-    }
-
-    // اختر اللهجة العربية المتاحة فعلياً على الهاتف بدلاً من افتراض localeId عام.
-    try {
-      final availableLocales = await speech.locales();
-      final arabicLocales = availableLocales
-          .where((locale) => locale.localeId.toLowerCase().startsWith('ar'))
-          .toList();
-      if (arabicLocales.isNotEmpty) {
-        final preferred = arabicLocales.where((locale) =>
-            locale.localeId.toLowerCase().contains('sa')).toList();
-        speechLocaleId = preferred.isNotEmpty
-            ? preferred.first.localeId
-            : arabicLocales.first.localeId;
-      }
-    } catch (_) {
-      speechLocaleId = 'ar';
-    }
-
-    // تحرير قفل البدء قبل استدعاء _listenAgain حتى لا يبقى التسجيل معلقاً.
-    starting = false;
-    await _listenAgain();
-  }
-
-  void _handleSpeechStatus(String speechStatus) {
-    if (!mounted) return;
-
-    if (speechStatus == 'listening') {
-      if (!recordingClock.isRunning) recordingClock.start();
-      elapsedTicker ??= Timer.periodic(const Duration(seconds: 1), (_) {
-        if (mounted && keepRecording) {
-          setState(() => elapsedSeconds = recordingClock.elapsed.inSeconds);
-        }
-      });
-      setState(() {
-        listening = true;
-        status = 'التسجيل يعمل… قل الذكر بوضوح';
-      });
-    } else if (speechStatus == 'done' || speechStatus == 'notListening') {
-      // كل جلسة Android SpeechRecognizer مستقلة؛ لا تحمل عدّ الجلسة السابقة معها.
-      countedInCurrentUtterance = 0;
-      setState(() => listening = false);
-      if (keepRecording) _scheduleRestart();
-    }
-  }
-
-  void _scheduleRestart() {
-    if (restartScheduled || !keepRecording) return;
-    restartScheduled = true;
-    Future<void>.delayed(const Duration(milliseconds: 700), () async {
-      restartScheduled = false;
-      if (!mounted || !keepRecording || listening) return;
-      // إذا كان طلب listen السابق لم ينتهِ بعد، أعد المحاولة بدلاً من إسقاطها.
-      if (starting) {
-        _scheduleRestart();
-        return;
-      }
-      await _listenAgain();
-    });
-  }
-
-  Future<void> _listenAgain() async {
-    if (!keepRecording || starting) return;
-    starting = true;
-    // يبدأ كل استدعاء listen جلسة تعرف جديدة، وقد لا يرسل Android finalResult
-    // للجلسة السابقة؛ لذلك نعيد مؤشر الجلسة دون تصفير إجمالي العداد.
-    countedInCurrentUtterance = 0;
-    try {
-      await speech.listen(
-        localeId: speechLocaleId,
-        // نسمح بفترة صمت طويلة؛ وعند إغلاق Android للجلسة نعيد فتحها
-        // من دون تصفير المؤقت أو إجمالي العدّاد.
-        listenFor: const Duration(minutes: 10),
-        pauseFor: const Duration(minutes: 3),
-        partialResults: true,
-        cancelOnError: false,
-        listenMode: stt.ListenMode.dictation,
-        onResult: (result) {
-          if (!mounted) return;
-          final recognized = result.recognizedWords.trim();
-          setState(() => lastHeard = recognized);
-
-          // نتائج التعرف قد تصل تدريجياً قبل النتيجة النهائية.
-          // نحتسب فقط الزيادات في عدد التكرارات المطابقة داخل العبارة نفسها،
-          // حتى لا نكرر احتساب النص الجزئي مرة ثانية عند وصول النتيجة النهائية.
-          final repetitions = _countExactRepetitions(recognized, dhikr);
-          if (repetitions > countedInCurrentUtterance) {
-            final newRepetitions = repetitions - countedInCurrentUtterance;
-            setState(() {
-              count += newRepetitions;
-              for (var i = 0; i < newRepetitions; i++) {
-                recognizedDhikr.add(dhikr);
-              }
-              status = 'تم احتساب الذكر ✓';
-            });
-            countedInCurrentUtterance = repetitions;
-          }
-
-          if (result.finalResult) {
-            if (repetitions == 0 && countedInCurrentUtterance == 0) {
-              setState(() {
-                status = recognized.isEmpty
-                    ? 'لم يلتقط الهاتف كلاماً واضحاً، حاول مجدداً'
-                    : 'الكلام الملتقط لا يطابق الذكر المحدد وحده';
-              });
-            }
-            countedInCurrentUtterance = 0;
-          }
-        },
-      );
-      if (mounted && keepRecording) {
-        setState(() {
-          status = 'تم طلب تشغيل الميكروفون، بانتظار تأكيد النظام…';
-        });
-      }
-    } catch (_) {
-      keepRecording = false;
-      if (mounted) {
-        setState(() {
-          listening = false;
-          status = 'حدث خطأ أثناء التسجيل. حاول مرة أخرى.';
-        });
-      }
-    } finally {
-      starting = false;
     }
   }
 
   Future<void> stopRecording() async {
     keepRecording = false;
-    restartScheduled = false;
     elapsedTicker?.cancel();
     elapsedTicker = null;
     recordingClock.stop();
     elapsedSeconds = recordingClock.elapsed.inSeconds;
-    await speech.stop();
+    try {
+      await _recorder.invokeMethod('stop');
+    } catch (_) {}
     if (mounted) {
       setState(() {
         listening = false;
+        starting = false;
         status = 'تم إيقاف التسجيل';
       });
     }
@@ -327,25 +241,17 @@ class _CounterPageState extends State<CounterPage> {
     // عند تغيير الذكر نعيد فتح جلسة التعرف حتى لا تختلط كلمات الذكر السابق
     // بنتائج الذكر الجديد.
     if (keepRecording) {
-      restartScheduled = true;
-      speech.stop();
-      listening = false;
-      Future<void>.delayed(const Duration(milliseconds: 500), () async {
-        restartScheduled = false;
-        if (mounted && keepRecording && !starting && !listening) {
-          await _listenAgain();
-        }
-      });
+      _recorder.invokeMethod('setDhikr', {'dhikr': value});
     }
   }
 
   @override
   void dispose() {
-    keepRecording = false;
     elapsedTicker?.cancel();
     recordingClock.stop();
-    speech.stop();
-    customController.dispose();
+    recorderEvents?.cancel();
+    // لا نوقف خدمة الميكروفون هنا؛ قد تكون الواجهة أُغلقت بينما المستخدم
+    // يريد استمرار التسجيل في الخلفية.
     super.dispose();
   }
 
