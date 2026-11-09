@@ -57,6 +57,7 @@ class _CounterPageState extends State<CounterPage> {
   String dhikr = 'لا إله إلا الله';
   String status = 'جاهز للتسجيل';
   int count = 0;
+  final List<String> recognizedDhikr = [];
   bool ready = false;
   bool listening = false;
   bool keepRecording = false;
@@ -186,29 +187,26 @@ class _CounterPageState extends State<CounterPage> {
         listenMode: stt.ListenMode.dictation,
         onResult: (result) {
           if (!mounted) return;
-          setState(() => lastHeard = result.recognizedWords);
-          // احتساب النتائج الجزئية أيضاً؛ بعض خدمات الهاتف لا ترسل نتيجة نهائية
-          // بشكل موثوق. نحتفظ بأعلى عدد ظهر في العبارة الحالية لمنع العد المكرر.
-          final found = _countOccurrences(result.recognizedWords, dhikr);
-          final added = found > countedInCurrentUtterance
-              ? found - countedInCurrentUtterance
-              : 0;
-          if (found > countedInCurrentUtterance) {
-            countedInCurrentUtterance = found;
-          }
-          if (added > 0) {
-            setState(() {
-              count += added;
-              status = 'تم احتساب $added من الذكر ✓';
-            });
-          } else if (result.finalResult && found == 0) {
-            setState(() {
-              status = result.recognizedWords.trim().isEmpty
-                  ? 'لم يلتقط الهاتف كلاماً واضحاً، حاول مجدداً'
-                  : 'التقط الهاتف: ' + result.recognizedWords;
-            });
-          }
+          final recognized = result.recognizedWords.trim();
+          setState(() => lastHeard = recognized);
+
+          // لا نحتسب إلا العبارة الكاملة المطابقة للذكر وحده.
+          // وجود أي كلمة إضافية يجعل النتيجة غير مطابقة.
           if (result.finalResult) {
+            final isExactMatch = _normalize(recognized) == _normalize(dhikr);
+            if (isExactMatch) {
+              setState(() {
+                count += 1;
+                recognizedDhikr.add(dhikr);
+                status = 'تم احتساب الذكر ✓';
+              });
+            } else {
+              setState(() {
+                status = recognized.isEmpty
+                    ? 'لم يلتقط الهاتف كلاماً واضحاً، حاول مجدداً'
+                    : 'العبارة لا تطابق الذكر المحدد بالكامل';
+              });
+            }
             countedInCurrentUtterance = 0;
           }
         },
@@ -249,7 +247,9 @@ class _CounterPageState extends State<CounterPage> {
     lastHeard = '';
     setState(() {
       dhikr = value;
-      status = 'تم اختيار الذكر';
+      count = 0;
+      recognizedDhikr.clear();
+      status = 'تم اختيار الذكر، وتم بدء سجل جديد';
     });
 
     // عند تغيير الذكر نعيد فتح جلسة التعرف حتى لا تختلط كلمات الذكر السابق
@@ -296,6 +296,7 @@ class _CounterPageState extends State<CounterPage> {
               tooltip: 'تصفير العدّاد',
               onPressed: () => setState(() {
                 count = 0;
+                recognizedDhikr.clear();
                 status = 'تم تصفير العدّاد';
               }),
               icon: const Icon(Icons.refresh_rounded),
@@ -485,6 +486,64 @@ class _CounterPageState extends State<CounterPage> {
                   ],
                 ),
               ),
+              if (recognizedDhikr.isNotEmpty)
+                Container(
+                  margin: const EdgeInsets.only(top: 12),
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: card,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: const Color(0xFFDCE1E7)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text(
+                        'سجلّ الأذكار المقروءة',
+                        style: TextStyle(
+                          color: ink,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      ...List.generate(recognizedDhikr.length, (index) {
+                        final id = index + 1;
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 5),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 42,
+                                padding: const EdgeInsets.symmetric(vertical: 5),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFE3E8EE),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text(
+                                  'ID $id',
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    color: ink,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  recognizedDhikr[index],
+                                  style: const TextStyle(color: ink, fontSize: 14),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      }),
+                    ],
+                  ),
+                ),
               if (lastHeard.isNotEmpty)
                 Container(
                   margin: const EdgeInsets.only(top: 10),
@@ -530,6 +589,7 @@ class _CounterPageState extends State<CounterPage> {
                 child: TextButton.icon(
                   onPressed: () => setState(() {
                     count = 0;
+                    recognizedDhikr.clear();
                     status = 'تم تصفير العدّاد';
                   }),
                   icon: const Icon(Icons.restart_alt_rounded),
