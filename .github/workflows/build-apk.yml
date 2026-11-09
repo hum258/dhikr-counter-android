@@ -197,6 +197,8 @@ jobs:
                           countedInUtterance = 0
                           prefs.edit().putInt("count", 0).putString("history_json", "[]").apply()
                           emit("reset")
+                          if (!active) { stopSelf(); return START_NOT_STICKY }
+                          return START_STICKY
                       }
                       "SET_DHIKR" -> {
                           target = intent.getStringExtra("dhikr") ?: target
