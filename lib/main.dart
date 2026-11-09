@@ -123,17 +123,27 @@ class _CounterPageState extends State<CounterPage> {
         onStatus: _handleSpeechStatus,
         onError: (error) {
           starting = false;
-          if (error.permanent) {
-            keepRecording = false;
-          } else if (keepRecording) {
+          // الصمت أو عدم وجود كلام واضح ليس سبباً لإيقاف جلسة الذكر.
+          // نعيد فتح الاستماع ونُبقي المؤقت جارياً حتى يضغط المستخدم إيقاف.
+          final code = error.errorMsg.toLowerCase();
+          final silenceError = code.contains('no_match') ||
+              code.contains('speech_timeout') ||
+              code.contains('timeout') ||
+              code.contains('no-match');
+          if (keepRecording && (!error.permanent || silenceError)) {
             _scheduleRestart();
+          } else if (error.permanent) {
+            keepRecording = false;
+            elapsedTicker?.cancel();
+            elapsedTicker = null;
+            recordingClock.stop();
           }
           if (mounted) {
             setState(() {
               listening = false;
-              status = error.permanent
-                  ? 'تعذر التعرف على الصوت: ${error.errorMsg}'
-                  : 'انقطع التعرف مؤقتاً، أحاول استئنافه…';
+              status = keepRecording
+                  ? 'لا يوجد كلام حالياً، سيبقى التسجيل جاهزاً…'
+                  : 'تعذر التعرف على الصوت: ${error.errorMsg}';
             });
           }
         },
@@ -230,10 +240,10 @@ class _CounterPageState extends State<CounterPage> {
     try {
       await speech.listen(
         localeId: speechLocaleId,
-        // جلسات أقصر تمنع تراكم نص طويل داخل جلسة تعرف واحدة.
-        // عند انتهاء المهلة يعاد فتح الاستماع تلقائياً.
-        listenFor: const Duration(minutes: 1),
-        pauseFor: const Duration(seconds: 2),
+        // نسمح بفترة صمت طويلة؛ وعند إغلاق Android للجلسة نعيد فتحها
+        // من دون تصفير المؤقت أو إجمالي العدّاد.
+        listenFor: const Duration(minutes: 10),
+        pauseFor: const Duration(minutes: 3),
         partialResults: true,
         cancelOnError: false,
         listenMode: stt.ListenMode.dictation,
