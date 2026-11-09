@@ -107,6 +107,10 @@ jobs:
                                   startService(Intent(this, DhikrRecognitionService::class.java).setAction("STOP"))
                                   result.success(true)
                               }
+                              "resetCount" -> {
+                                  startService(Intent(this, DhikrRecognitionService::class.java).setAction("RESET_COUNT"))
+                                  result.success(true)
+                              }
                               "setDhikr" -> {
                                   val intent = Intent(this, DhikrRecognitionService::class.java).setAction("SET_DHIKR")
                                       .putExtra("dhikr", call.argument<String>("dhikr") ?: "")
@@ -189,6 +193,11 @@ jobs:
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                   when (intent?.action) {
                       "STOP" -> { stopRecognition(); stopSelf(); return START_NOT_STICKY }
+                      "RESET_COUNT" -> {
+                          countedInUtterance = 0
+                          prefs.edit().putInt("count", 0).putString("history_json", "[]").apply()
+                          emit("reset")
+                      }
                       "SET_DHIKR" -> {
                           target = intent.getStringExtra("dhikr") ?: target
                           countedInUtterance = 0
