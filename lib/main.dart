@@ -112,12 +112,18 @@ class _CounterPageState extends State<CounterPage> {
       ready = await speech.initialize(
         onStatus: _handleSpeechStatus,
         onError: (error) {
-          keepRecording = false;
           starting = false;
+          if (error.permanent) {
+            keepRecording = false;
+          } else if (keepRecording) {
+            _scheduleRestart();
+          }
           if (mounted) {
             setState(() {
               listening = false;
-              status = 'تعذر التعرف على الصوت: ${error.errorMsg}';
+              status = error.permanent
+                  ? 'تعذر التعرف على الصوت: ${error.errorMsg}'
+                  : 'انقطع التعرف مؤقتاً، أحاول استئنافه…';
             });
           }
         },
@@ -182,8 +188,10 @@ class _CounterPageState extends State<CounterPage> {
       await speech.listen(
         localeId: 'ar',
         listenFor: const Duration(minutes: 10),
+        // عند انتهاء مهلة الصمت يعيد التطبيق فتح جلسة الاستماع تلقائياً.
         pauseFor: const Duration(seconds: 10),
         partialResults: true,
+        cancelOnError: false,
         listenMode: stt.ListenMode.dictation,
         onResult: (result) {
           if (!mounted) return;
@@ -514,18 +522,18 @@ class _CounterPageState extends State<CounterPage> {
                           child: Row(
                             children: [
                               Container(
-                                width: 42,
+                                width: 34,
                                 padding: const EdgeInsets.symmetric(vertical: 5),
                                 decoration: BoxDecoration(
                                   color: const Color(0xFFE3E8EE),
                                   borderRadius: BorderRadius.circular(8),
                                 ),
                                 child: Text(
-                                  'ID $id',
+                                  '$id-',
                                   textAlign: TextAlign.center,
                                   style: const TextStyle(
                                     color: ink,
-                                    fontSize: 11,
+                                    fontSize: 13,
                                     fontWeight: FontWeight.w800,
                                   ),
                                 ),
