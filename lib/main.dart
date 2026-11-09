@@ -199,6 +199,8 @@ class _CounterPageState extends State<CounterPage> {
         status = 'التسجيل يعمل… قل الذكر بوضوح';
       });
     } else if (speechStatus == 'done' || speechStatus == 'notListening') {
+      // كل جلسة Android SpeechRecognizer مستقلة؛ لا تحمل عدّ الجلسة السابقة معها.
+      countedInCurrentUtterance = 0;
       setState(() => listening = false);
       if (keepRecording) _scheduleRestart();
     }
@@ -217,6 +219,9 @@ class _CounterPageState extends State<CounterPage> {
   Future<void> _listenAgain() async {
     if (!keepRecording || starting) return;
     starting = true;
+    // يبدأ كل استدعاء listen جلسة تعرف جديدة، وقد لا يرسل Android finalResult
+    // للجلسة السابقة؛ لذلك نعيد مؤشر الجلسة دون تصفير إجمالي العداد.
+    countedInCurrentUtterance = 0;
     try {
       await speech.listen(
         localeId: speechLocaleId,
