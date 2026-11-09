@@ -65,6 +65,7 @@ class _CounterPageState extends State<CounterPage> {
   bool restartScheduled = false;
   String lastHeard = '';
   int countedInCurrentUtterance = 0;
+  String speechLocaleId = 'ar';
 
   String _normalize(String value) {
     return value
@@ -149,6 +150,23 @@ class _CounterPageState extends State<CounterPage> {
       return;
     }
 
+    // اختر اللهجة العربية المتاحة فعلياً على الهاتف بدلاً من افتراض localeId عام.
+    try {
+      final availableLocales = await speech.locales();
+      final arabicLocales = availableLocales
+          .where((locale) => locale.localeId.toLowerCase().startsWith('ar'))
+          .toList();
+      if (arabicLocales.isNotEmpty) {
+        final preferred = arabicLocales.where((locale) =>
+            locale.localeId.toLowerCase().contains('sa')).toList();
+        speechLocaleId = preferred.isNotEmpty
+            ? preferred.first.localeId
+            : arabicLocales.first.localeId;
+      }
+    } catch (_) {
+      speechLocaleId = 'ar';
+    }
+
     // تحرير قفل البدء قبل استدعاء _listenAgain حتى لا يبقى التسجيل معلقاً.
     starting = false;
     await _listenAgain();
@@ -183,7 +201,7 @@ class _CounterPageState extends State<CounterPage> {
     starting = true;
     try {
       await speech.listen(
-        localeId: 'ar',
+        localeId: speechLocaleId,
         listenFor: const Duration(minutes: 10),
         // عند انتهاء مهلة الصمت يعيد التطبيق فتح جلسة الاستماع تلقائياً.
         pauseFor: const Duration(seconds: 10),
@@ -195,25 +213,28 @@ class _CounterPageState extends State<CounterPage> {
           final recognized = result.recognizedWords.trim();
           setState(() => lastHeard = recognized);
 
-          // قد يجمع محرك الصوت أكثر من تكرار في نتيجة نهائية واحدة.
-          // نحتسب كل تكرار كامل ومتتالٍ للذكر المختار، ونرفض أي كلام زائد.
+          // نتائج التعرف قد تصل تدريجياً قبل النتيجة النهائية.
+          // نحتسب فقط الزيادات في عدد التكرارات المطابقة داخل العبارة نفسها،
+          // حتى لا نكرر احتساب النص الجزئي مرة ثانية عند وصول النتيجة النهائية.
+          final repetitions = _countExactRepetitions(recognized, dhikr);
+          if (repetitions > countedInCurrentUtterance) {
+            final newRepetitions = repetitions - countedInCurrentUtterance;
+            setState(() {
+              count += newRepetitions;
+              for (var i = 0; i < newRepetitions; i++) {
+                recognizedDhikr.add(dhikr);
+              }
+              status = 'تم احتساب الذكر ✓';
+            });
+            countedInCurrentUtterance = repetitions;
+          }
+
           if (result.finalResult) {
-            final repetitions = _countExactRepetitions(recognized, dhikr);
-            if (repetitions > 0) {
-              setState(() {
-                count += repetitions;
-                for (var i = 0; i < repetitions; i++) {
-                  recognizedDhikr.add(dhikr);
-                }
-                status = repetitions == 1
-                    ? 'تم احتساب الذكر ✓'
-                    : 'تم احتساب $repetitions أذكار ✓';
-              });
-            } else {
+            if (repetitions == 0 && countedInCurrentUtterance == 0) {
               setState(() {
                 status = recognized.isEmpty
                     ? 'لم يلتقط الهاتف كلاماً واضحاً، حاول مجدداً'
-                    : 'العبارة لا تطابق الذكر المحدد بالكامل';
+                    : 'الكلام الملتقط لا يطابق الذكر المحدد وحده';
               });
             }
             countedInCurrentUtterance = 0;
