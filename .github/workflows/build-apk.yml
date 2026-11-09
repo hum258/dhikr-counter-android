@@ -56,7 +56,7 @@ jobs:
                   <service
                       android:name=".DhikrRecognitionService"
                       android:exported="false"
-                      android:foregroundServiceType="microphone" />
+                      android:foregroundServiceType="microphone"\n                      android:stopWithTask="false" />
           '''
           if "DhikrRecognitionService" not in s:
               s = s.replace("</application>", service + "\\n    </application>")
@@ -119,7 +119,7 @@ jobs:
                                       "running" to p.getBoolean("running", false),
                                       "listening" to p.getBoolean("listening", false),
                                       "count" to p.getInt("count", 0),
-                                      "history" to p.getStringSet("history", emptySet<String>())?.toList().orEmpty()
+                                      "history" to org.json.JSONArray(p.getString("history_json", "[]")).let { a -> (0 until a.length()).map { a.getString(it) } }
                                   ))
                               }
                               else -> result.notImplemented()
@@ -192,7 +192,7 @@ jobs:
                       "SET_DHIKR" -> {
                           target = intent.getStringExtra("dhikr") ?: target
                           countedInUtterance = 0
-                          prefs.edit().putString("target", target).putInt("count", 0).putStringSet("history", emptySet()).apply()
+                          prefs.edit().putString("target", target).putInt("count", 0).putString("history_json", "[]").apply()
                           emit("state", listening = active)
                       }
                       else -> {
@@ -290,16 +290,18 @@ jobs:
                   if (total > countedInUtterance) {
                       val delta = total - countedInUtterance
                       val old = prefs.getInt("count", 0)
-                      val history = prefs.getStringSet("history", emptySet())?.toMutableList() ?: mutableListOf()
-                      repeat(delta) { history.add(target) }
-                      prefs.edit().putInt("count", old + delta).putStringSet("history", history.toSet()).apply()
+                      val history = org.json.JSONArray(prefs.getString("history_json", "[]"))
+                      repeat(delta) { history.put(target) }
+                      prefs.edit().putInt("count", old + delta).putString("history_json", history.toString()).apply()
                       countedInUtterance = total
                   }
                   emit("transcript", text)
               }
 
               private fun emit(type: String, text: String? = null, listening: Boolean = active) {
-                  val history = prefs.getStringSet("history", emptySet())?.toList().orEmpty()
+                  val historyJson = org.json.JSONArray(prefs.getString("history_json", "[]"))
+                  val history = (0 until historyJson.length()).map { historyJson.getString(it) }
+                  prefs.edit().putBoolean("listening", listening).apply()
                   MainActivity.emit(mapOf("type" to type, "text" to text, "listening" to listening,
                       "count" to prefs.getInt("count", 0), "history" to history))
               }
