@@ -63,6 +63,7 @@ class _CounterPageState extends State<CounterPage> {
   bool starting = false;
   bool restartScheduled = false;
   String lastHeard = '';
+  int countedInCurrentUtterance = 0;
 
   String _normalize(String value) {
     return value
@@ -182,20 +183,29 @@ class _CounterPageState extends State<CounterPage> {
         onResult: (result) {
           if (!mounted) return;
           setState(() => lastHeard = result.recognizedWords);
-          // نحتسب النتيجة النهائية فقط لتجنب تكرار النتائج الجزئية.
-          if (!result.finalResult) return;
-          final added = _countOccurrences(result.recognizedWords, dhikr);
+          // احتساب النتائج الجزئية أيضاً؛ بعض خدمات الهاتف لا ترسل نتيجة نهائية
+          // بشكل موثوق. نحتفظ بأعلى عدد ظهر في العبارة الحالية لمنع العد المكرر.
+          final found = _countOccurrences(result.recognizedWords, dhikr);
+          final added = found > countedInCurrentUtterance
+              ? found - countedInCurrentUtterance
+              : 0;
+          if (found > countedInCurrentUtterance) {
+            countedInCurrentUtterance = found;
+          }
           if (added > 0) {
             setState(() {
               count += added;
               status = 'تم احتساب $added من الذكر ✓';
             });
-          } else {
+          } else if (result.finalResult && found == 0) {
             setState(() {
               status = result.recognizedWords.trim().isEmpty
                   ? 'لم يلتقط الهاتف كلاماً واضحاً، حاول مجدداً'
-                  : 'سمع الهاتف كلاماً لكنه لم يطابق الذكر المحدد';
+                  : 'التقط الهاتف: ' + result.recognizedWords;
             });
+          }
+          if (result.finalResult) {
+            countedInCurrentUtterance = 0;
           }
         },
       );
