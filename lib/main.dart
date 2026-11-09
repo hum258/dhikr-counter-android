@@ -79,25 +79,22 @@ class _CounterPageState extends State<CounterPage> {
         .trim();
   }
 
-  int _countOccurrences(String recognized, String target) {
+  // يقبل تكرار الذكر المحدد متتالياً فقط، ويرفض أي كلام زائد أو مختلف.
+  int _countExactRepetitions(String recognized, String target) {
     final heardWords = _normalize(recognized).split(' ');
     final targetWords = _normalize(target).split(' ');
-    if (targetWords.isEmpty || heardWords.length < targetWords.length) {
+    if (targetWords.isEmpty ||
+        heardWords.isEmpty ||
+        heardWords.length % targetWords.length != 0) {
       return 0;
     }
 
-    var matches = 0;
-    for (var i = 0; i <= heardWords.length - targetWords.length; i++) {
-      var match = true;
-      for (var j = 0; j < targetWords.length; j++) {
-        if (heardWords[i + j] != targetWords[j]) {
-          match = false;
-          break;
-        }
+    for (var start = 0; start < heardWords.length; start += targetWords.length) {
+      for (var i = 0; i < targetWords.length; i++) {
+        if (heardWords[start + i] != targetWords[i]) return 0;
       }
-      if (match) matches++;
     }
-    return matches;
+    return heardWords.length ~/ targetWords.length;
   }
 
   Future<void> startRecording() async {
@@ -198,15 +195,19 @@ class _CounterPageState extends State<CounterPage> {
           final recognized = result.recognizedWords.trim();
           setState(() => lastHeard = recognized);
 
-          // لا نحتسب إلا العبارة الكاملة المطابقة للذكر وحده.
-          // وجود أي كلمة إضافية يجعل النتيجة غير مطابقة.
+          // قد يجمع محرك الصوت أكثر من تكرار في نتيجة نهائية واحدة.
+          // نحتسب كل تكرار كامل ومتتالٍ للذكر المختار، ونرفض أي كلام زائد.
           if (result.finalResult) {
-            final isExactMatch = _normalize(recognized) == _normalize(dhikr);
-            if (isExactMatch) {
+            final repetitions = _countExactRepetitions(recognized, dhikr);
+            if (repetitions > 0) {
               setState(() {
-                count += 1;
-                recognizedDhikr.add(dhikr);
-                status = 'تم احتساب الذكر ✓';
+                count += repetitions;
+                for (var i = 0; i < repetitions; i++) {
+                  recognizedDhikr.add(dhikr);
+                }
+                status = repetitions == 1
+                    ? 'تم احتساب الذكر ✓'
+                    : 'تم احتساب $repetitions أذكار ✓';
               });
             } else {
               setState(() {
