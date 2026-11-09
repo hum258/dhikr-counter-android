@@ -106,7 +106,13 @@ class _CounterPageState extends State<CounterPage> {
   void _handleNativeEvent(dynamic event) {
     if (!mounted || event is! Map) return;
     final type = event['type'];
-    if (type == 'transcript') {
+    if (type == 'reset') {
+      setState(() {
+        count = 0;
+        recognizedDhikr.clear();
+        status = 'تم تصفير العدّاد والسجل';
+      });
+    } else if (type == 'transcript') {
       final heard = (event['text'] ?? '').toString();
       final savedHistory = (event['history'] as List?)?.cast<String>();
       setState(() {
@@ -210,6 +216,18 @@ class _CounterPageState extends State<CounterPage> {
     }
   }
 
+  Future<void> resetCounter() async {
+    try {
+      await _recorder.invokeMethod('resetCount');
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      count = 0;
+      recognizedDhikr.clear();
+      status = 'تم تصفير العدّاد والسجل';
+    });
+  }
+
   Future<void> stopRecording() async {
     keepRecording = false;
     elapsedTicker?.cancel();
@@ -274,11 +292,7 @@ class _CounterPageState extends State<CounterPage> {
           actions: [
             IconButton(
               tooltip: 'تصفير العدّاد',
-              onPressed: () => setState(() {
-                count = 0;
-                recognizedDhikr.clear();
-                status = 'تم تصفير العدّاد';
-              }),
+              onPressed: resetCounter,
               icon: const Icon(Icons.refresh_rounded),
             ),
           ],
@@ -572,11 +586,7 @@ class _CounterPageState extends State<CounterPage> {
               const SizedBox(height: 8),
               Center(
                 child: TextButton.icon(
-                  onPressed: () => setState(() {
-                    count = 0;
-                    recognizedDhikr.clear();
-                    status = 'تم تصفير العدّاد';
-                  }),
+                  onPressed: resetCounter,
                   icon: const Icon(Icons.restart_alt_rounded),
                   label: const Text('تصفير العدّاد'),
                   style: TextButton.styleFrom(foregroundColor: muted),
