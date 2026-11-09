@@ -70,6 +70,9 @@ class _CounterPageState extends State<CounterPage> {
         .replaceAll(RegExp(r'[ًٌٍَُِّْـٰ]'), '')
         .replaceAll(RegExp(r'[أإآٱ]'), 'ا')
         .replaceAll('ى', 'ي')
+        .replaceAll('ة', 'ه')
+        .replaceAll('ؤ', 'و')
+        .replaceAll('ئ', 'ي')
         .replaceAll(RegExp(r'[،؛؟,.!؟:…()\[\]{}"“”]'), ' ')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
@@ -180,6 +183,7 @@ class _CounterPageState extends State<CounterPage> {
         listenFor: const Duration(minutes: 10),
         pauseFor: const Duration(seconds: 10),
         partialResults: true,
+        listenMode: stt.ListenMode.dictation,
         onResult: (result) {
           if (!mounted) return;
           setState(() => lastHeard = result.recognizedWords);
@@ -241,10 +245,26 @@ class _CounterPageState extends State<CounterPage> {
   }
 
   void _selectDhikr(String value) {
+    countedInCurrentUtterance = 0;
+    lastHeard = '';
     setState(() {
       dhikr = value;
       status = 'تم اختيار الذكر';
     });
+
+    // عند تغيير الذكر نعيد فتح جلسة التعرف حتى لا تختلط كلمات الذكر السابق
+    // بنتائج الذكر الجديد.
+    if (keepRecording) {
+      restartScheduled = true;
+      speech.stop();
+      listening = false;
+      Future<void>.delayed(const Duration(milliseconds: 500), () async {
+        restartScheduled = false;
+        if (mounted && keepRecording && !starting && !listening) {
+          await _listenAgain();
+        }
+      });
+    }
   }
 
   @override
